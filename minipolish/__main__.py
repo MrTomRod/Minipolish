@@ -44,14 +44,15 @@ def get_arguments(args):
                               help='Number of threads to use for alignment and polishing')
     setting_args.add_argument('--rounds', type=int, default=2,
                               help='Number of full Racon polishing rounds')
-    setting_args.add_argument('--pacbio', action='store_true',
-                              help='Use this flag for PacBio reads to make Minipolish use the '
-                                   'map-pb Minimap2 preset (default: assumes Nanopore reads and '
-                                   'uses the map-ont preset)')
+    setting_args.add_argument('--minimap2-preset', type=str, default='map-ont',
+                              choices=['map-ont', 'map-pb', 'map-hifi'],
+                              help='Specify the minimap2 preset to use: "map-pb" for PacBio CLR, '
+                                   '"map-ont" for Oxford Nanopore, or "map-hifi" for PacBio HiFi/CCS '
+                                   '(default: map-ont)')
     setting_args.add_argument('--skip_initial', action='store_true',
                               help='Skip the initial polishing round - appropriate if the input '
                                    'GFA does not have "a" lines (default: do the initial '
-                                   'polishing round')
+                                   'polishing round)')
 
     other_args = parser.add_argument_group('Other')
     other_args.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS,
@@ -63,7 +64,6 @@ def get_arguments(args):
     args = parser.parse_args(args)
     return args
 
-
 def main(args=None):
     args = get_arguments(args)
     check_for_required_tools()
@@ -72,15 +72,14 @@ def main(args=None):
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_dir = pathlib.Path(tmp_dir)
         if not args.skip_initial:
-            initial_polish(graph, args.reads, args.threads, tmp_dir, args.pacbio)
+            initial_polish(graph, args.reads, args.threads, tmp_dir, args.minimap2_preset)
         if args.rounds > 0:
-            full_polish(graph, args.reads, args.threads, args.rounds, tmp_dir, args.pacbio)
-        assign_depths(graph, args.reads, args.threads, tmp_dir, args.pacbio)
+            full_polish(graph, args.reads, args.threads, args.rounds, tmp_dir, args.minimap2_preset)
+        assign_depths(graph, args.reads, args.threads, tmp_dir, args.minimap2_preset)
     # TODO (maybe): add a step here to recalculate the overlaps between segments
     graph.print_to_stdout()
 
-
-def initial_polish(graph, read_filename, threads, tmp_dir, pacbio):
+def initial_polish(graph, read_filename, threads, tmp_dir, minimap2_preset):
     section_header('Initial polishing round')
     explanation('The first round of polishing is done on a per-segment basis and only uses reads '
                 'which are definitely associated with the segment (because the GFA indicated that '
@@ -91,7 +90,7 @@ def initial_polish(graph, read_filename, threads, tmp_dir, pacbio):
         seg_seq_filename = tmp_dir / (segment.name + '.fasta')
         segment.save_to_fasta(seg_seq_filename)
         fixed_seqs = run_racon(segment.name, seg_read_filename, seg_seq_filename, threads,
-                               tmp_dir, pacbio)
+                               tmp_dir, minimap2_preset)
         try:
             fixed_seq = fixed_seqs[segment.name]
         except KeyError:
@@ -102,8 +101,7 @@ def initial_polish(graph, read_filename, threads, tmp_dir, pacbio):
             graph.remove_segment(segment.name)
     log()
 
-
-def full_polish(graph, read_filename, threads, rounds, tmp_dir, pacbio):
+def full_polish(graph, read_filename, threads, rounds, tmp_dir, minimap2_preset):
     section_header('Full polishing rounds')
     explanation('The assembly graph is now polished using all of the reads. Multiple rounds of '
                 'polishing are done, and circular contigs are rotated between rounds.')
@@ -113,11 +111,10 @@ def full_polish(graph, read_filename, threads, rounds, tmp_dir, pacbio):
         unpolished_filename = tmp_dir / (round_name + '.fasta')
         graph.save_to_fasta(unpolished_filename)
         fixed_seqs = run_racon(round_name, read_filename, unpolished_filename, threads, tmp_dir,
-                               pacbio)
+                               minimap2_preset)
         graph.replace_sequences(fixed_seqs)
 
-
-def assign_depths(graph, read_filename, threads, tmp_dir, pacbio):
+def assign_depths(graph, read_filename, threads, tmp_dir, minimap2_preset):
     section_header('Assign read depths')
     explanation('The reads are aligned to the contigs one final time to calculate read depth '
                 'values.')
@@ -130,8 +127,7 @@ def assign_depths(graph, read_filename, threads, tmp_dir, pacbio):
     base_count = count_fasta_bases(depth_filename)
     log(f'  contigs:    {depth_filename} ({base_count:,} bp)')
 
-    preset = 'map-pb' if pacbio else 'map-ont'
-    command = ['minimap2', '-t', str(threads), '-x', preset, depth_filename, read_filename]
+    command = ['minimap2', '-t', str(threads), '-x', minimap2_preset, depth_filename, read_filename]
     alignments_filename = tmp_dir / 'depths.paf'
     minimap2_log = tmp_dir / 'depths_minimap2.log'
     with open(alignments_filename, 'wt') as stdout, open(minimap2_log, 'w') as stderr:
